@@ -66,13 +66,17 @@ def send_to_discord(report_text, title="🚨 AUTOMATED AI TRADE ANALYSIS 🚨"):
 # ROUTES
 # ---------------------------------------------------------
 
-@app.route('/', methods=['GET'])
+# Main Root Endpoint
+@app.route('/', methods=['GET', 'POST'])
 def home():
     return "Farrukh AI Trading Bot is Live & Operational!", 200
 
-# 1. Manual Webhook Endpoint (For Direct POST Tests)
-@app.route('/webhook', methods=['POST'])
+# 1. Manual Webhook Endpoint (For External POST Signals)
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
+    if request.method == 'GET':
+        return jsonify({"status": "Active", "message": "Webhook endpoint is live. Send POST request with signal payload."}), 200
+
     try:
         data = request.get_json(silent=True) or {}
         symbol = data.get('symbol', 'XAUUSD')
@@ -89,7 +93,7 @@ def webhook():
     except Exception as e:
         return jsonify({"status": "Error", "message": str(e)}), 500
 
-# 2. Vercel Cron Endpoint (Har 1 Ghante Baad Auto-Trigger Hoga)
+# 2. Vercel Cron & Manual Browser Test Endpoint
 @app.route('/api/cron', methods=['GET', 'POST'])
 def auto_hourly_cron():
     try:
