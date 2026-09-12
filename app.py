@@ -1,106 +1,105 @@
 import os
+import json
 import requests
+import yfinance as yf
 from flask import Flask, request, jsonify
+from groq import Groq
 
 app = Flask(__name__)
 
 # Environment Variables
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-def send_discord_embed(title, description, color=3447003, fields=[]):
-    """Sends a styled embed message to Discord"""
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+# ---------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------
+def get_exness_market_data(symbol="XAUUSD=X"):
+    """
+    Exness Gold / Forex 1-Hour Chart Data Fetcher
+    Yahoo Finance Symbol for Gold is 'XAUUSD=X'
+    """
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(period="5d", interval="1h")
+    
+    current_price = round(df['Close'].iloc[-1], 2)
+    # Last 10 Hourly Candles Data (OHLCV)
+    recent_candles = df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(10).to_string()
+    
+    return current_price, recent_candles
+
+def analyze_with_groq_ai(symbol, price, candles_data, action=None, timeframe="1H"):
+    prompt = f"""
+    You are an expert Institutional Financial Analyst and Forex Trader.
+    Analyze the following chart data for {symbol} (Exness Rates):
+    
+    Current Price: {price}
+    Timeframe: {timeframe}
+    Signal Action Triggered: {action if action else 'Automated Hourly Check'}
+    
+    Recent Hourly Candles Data (OHLCV):
+    {candles_data}
+
+    Instructions:
+    1. Perform Price Action, Market Structure, and Momentum analysis.
+    2. Give a clear Decision: [BUY], [SELL], or [NO TRADE / WAIT].
+    3. Provide precise Entry Price, Stop Loss (SL), and Take Profit (TP1 & TP2) levels.
+    4. Keep the report concise, highly accurate, and formatted cleanly for Discord markdown.
+    """
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+    return response.choices[0].message.content
+
+def send_to_discord(report_text, title="🚨 AUTOMATED AI TRADE ANALYSIS 🚨"):
     if not DISCORD_WEBHOOK_URL:
         return
-        
-    embed = {
-        "title": title,
-        "description": description,
-        "color": color,
-        "fields": fields,
-        "footer": {"text": "Tauric AI Multi-Agent System"}
-    }
-    
-    payload = {"embeds": [embed]}
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload)
-    except Exception as e:
-        print(f"Error sending to Discord: {e}")
+    payload = {"content": f"**{title}**\n\n{report_text}"}
+    requests.post(DISCORD_WEBHOOK_URL, json=payload)
 
-def get_ai_analysis(symbol, action, timeframe, price):
-    prompt = f"""
-    You are an AI Trading Agent system analyzing a signal for {symbol}.
-    Signal Type: {action}
-    Timeframe: {timeframe}
-    Current Price: {price}
-
-    Conduct a multi-agent analysis:
-    1. Technical Bias Analysis
-    2. Risk Management & Position Sizing Warning
-    3. Final Verdict (CONFIRM / REJECT / WAIT) with concise reasoning.
-    
-    Provide output in clear, structured Roman Urdu/English for mobile notifications.
-    Keep it concise and actionable.
-    """
-    
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3
-    }
-    
-    try:
-        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
-        if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content']
-        else:
-            return f"AI Analysis Error: {response.text}"
-    except Exception as e:
-        return f"Error contacting Groq API: {str(e)}"
+# ---------------------------------------------------------
+# ROUTES
+# ---------------------------------------------------------
 
 @app.route('/', methods=['GET'])
 def home():
-    return "AI Trading Discord Server is Live!", 200
+    return "Farrukh AI Trading Bot is Live & Operational!", 200
 
+# 1. Manual Webhook Endpoint (For Direct POST Tests)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.json
-        if not data:
-            return jsonify({"status": "error", "message": "No JSON payload"}), 400
+        data = request.get_json(silent=True) or {}
+        symbol = data.get('symbol', 'XAUUSD')
+        action = data.get('action', 'SIGNAL')
+        price = data.get('price', 'N/A')
+        timeframe = data.get('timeframe', '1H')
 
-        symbol = data.get("symbol", "UNKNOWN")
-        action = str(data.get("action", "ALERT")).upper()
-        timeframe = data.get("timeframe", "15m")
-        price = data.get("price", "N/A")
-
-        # Color: Green for BUY, Red for SELL, Blue for default
-        embed_color = 5763719 if "BUY" in action else (15548927 if "SELL" in action else 3447003)
-
-        # 1. Immediate Signal Notification
-        signal_fields = [
-            {"name": "Symbol", "value": symbol, "inline": True},
-            {"name": "Action", "value": action, "inline": True},
-            {"name": "Price", "value": str(price), "inline": True},
-            {"name": "Timeframe", "value": timeframe, "inline": True}
-        ]
-        send_discord_embed("🚨 TradingView Signal Received", "⏳ *AI Agents are running multi-agent analysis...*", color=embed_color, fields=signal_fields)
-
-        # 2. Run AI Analysis
-        ai_result = get_ai_analysis(symbol, action, timeframe, price)
-
-        # 3. Final AI Report Notification
-        send_discord_embed(f"📊 AI Analysis Report - {symbol}", ai_result, color=embed_color)
-
-        return jsonify({"status": "success"}), 200
-
+        curr_price, candles = get_exness_market_data("XAUUSD=X")
+        
+        ai_report = analyze_with_groq_ai(symbol, curr_price, candles, action=action, timeframe=timeframe)
+        send_to_discord(ai_report, title=f"🚨 SIGNAL ALERT: {symbol} ({action}) 🚨")
+        
+        return jsonify({"status": "Success", "message": "Signal analyzed and sent to Discord"}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "Error", "message": str(e)}), 500
+
+# 2. Vercel Cron Endpoint (Har 1 Ghante Baad Auto-Trigger Hoga)
+@app.route('/api/cron', methods=['GET', 'POST'])
+def auto_hourly_cron():
+    try:
+        curr_price, candles = get_exness_market_data("XAUUSD=X")
+        ai_report = analyze_with_groq_ai("XAUUSD (Gold)", curr_price, candles, timeframe="1H")
+        send_to_discord(ai_report, title="⏰ 1-HOUR HOURLY EXNESS AI ANALYSIS ⏰")
+        
+        return jsonify({"status": "Success", "message": "Hourly analysis sent to Discord"}), 200
+    except Exception as e:
+        return jsonify({"status": "Error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=5000)
