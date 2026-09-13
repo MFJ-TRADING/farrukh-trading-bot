@@ -13,8 +13,7 @@ from datetime import datetime, timedelta
 SYMBOLS = {
     "XAUUSD": {"yf": "GC=F", "type": "futures"},   # Gold futures - closed weekends
     "EURUSD": {"yf": "EURUSD=X", "type": "forex"}, # Forex - closed weekends
-    "GBPUSD": {"yf": "GBPUSD=X", "type": "forex"}, # Forex - closed weekends
-    "BTCUSD": {"yf": "BTC-USD", "type": "crypto"}, # Crypto - 24/7
+    
     "ETHUSD": {"yf": "ETH-USD", "type": "crypto"}, # Crypto - 24/7
 }
 
