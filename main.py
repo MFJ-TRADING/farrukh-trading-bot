@@ -87,7 +87,7 @@ OUTPUT strictly in this Discord Markdown format:
 """
 
     response = client.chat.completions.create(
-        model="gpt-oss-120b",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
         max_tokens=900
