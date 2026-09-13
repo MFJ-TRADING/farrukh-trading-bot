@@ -21,18 +21,88 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "mf-trading-bot-90")
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
-GROQ_MODEL = "llama-3.3-70b-versatile"  # Free tier, JSON mode supported, no hidden reasoning tokens
-MAX_AI_RETRIES = 3          # retry AI call this many times if empty/invalid JSON response
+# Preferred order — bot picks the first one it actually has access to.
+# If Groq deprecates one, it just falls through to the next automatically.
+MODEL_PREFERENCE = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3-32b",
+]
+
 MAX_NTFY_RETRIES = 2        # retry sending notification if it fails
 SLEEP_BETWEEN_SYMBOLS = 2   # seconds, avoid rate limits / overlapping notifications
 AI_MAX_TOKENS = 300         # plain JSON output, no reasoning overhead needed
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# Populated at startup by discover_models(); analyze() rotates through this
+# list automatically if a model returns "model_not_found".
+CANDIDATE_MODELS = []
+CURRENT_MODEL_IDX = 0
+
 
 # ============================================================
-# LOGGING
+# MODEL DISCOVERY — ask Groq what this account can actually use
 # ============================================================
+def discover_models():
+    """
+    Query Groq's /models endpoint to see which models this API key
+    actually has access to, then build a candidate list ordered by
+    preference. Falls back to the raw preference list if the query
+    fails (e.g. network issue) — analyze() will still self-correct
+    via model_not_found handling in that case.
+    """
+    global CANDIDATE_MODELS
+    try:
+        resp = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            log(f"Could not fetch model list ({resp.status_code}): {resp.text}")
+            CANDIDATE_MODELS = list(MODEL_PREFERENCE)
+            return
+
+        available_ids = [m["id"] for m in resp.json().get("data", [])]
+        log(f"Groq account has access to {len(available_ids)} models: {available_ids}")
+
+        ordered = [m for m in MODEL_PREFERENCE if m in available_ids]
+
+        # add any other usable chat models not in our preference list, as extra fallback
+        for mid in available_ids:
+            low = mid.lower()
+            if mid not in ordered and not any(x in low for x in ("whisper", "guard", "tts", "compound")):
+                ordered.append(mid)
+
+        if not ordered:
+            log("WARNING: none of the preferred models were found in account's model list.")
+            ordered = list(MODEL_PREFERENCE)
+
+        CANDIDATE_MODELS = ordered
+        log(f"Model candidates in order of use: {CANDIDATE_MODELS}")
+
+    except Exception as e:
+        log(f"Exception discovering models: {e} — falling back to static preference list.")
+        CANDIDATE_MODELS = list(MODEL_PREFERENCE)
+
+
+def get_active_model():
+    if not CANDIDATE_MODELS:
+        return MODEL_PREFERENCE[0]
+    return CANDIDATE_MODELS[CURRENT_MODEL_IDX % len(CANDIDATE_MODELS)]
+
+
+def advance_model():
+    global CURRENT_MODEL_IDX
+    CURRENT_MODEL_IDX += 1
+    log(f"Switching to next candidate model: {get_active_model()}")
+
+
+
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}")
@@ -176,12 +246,14 @@ Respond with ONLY this exact JSON structure, no other text:
 }}"""
 
     last_error = None
+    max_attempts = max(len(CANDIDATE_MODELS), 1) + 2  # enough tries to rotate through all models plus a couple JSON retries
 
-    for attempt in range(1, MAX_AI_RETRIES + 1):
+    for attempt in range(1, max_attempts + 1):
+        current_model = get_active_model()
         try:
             try:
                 response = client.chat.completions.create(
-                    model=GROQ_MODEL,
+                    model=current_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -193,7 +265,7 @@ Respond with ONLY this exact JSON structure, no other text:
             except TypeError:
                 # older groq SDK versions may not accept response_format
                 response = client.chat.completions.create(
-                    model=GROQ_MODEL,
+                    model=current_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -206,7 +278,7 @@ Respond with ONLY this exact JSON structure, no other text:
             finish_reason = response.choices[0].finish_reason
 
             if not content or not content.strip():
-                last_error = f"Empty content (finish_reason={finish_reason})"
+                last_error = f"Empty content (finish_reason={finish_reason}) [model={current_model}]"
                 log(f"{symbol} AI attempt {attempt}: {last_error}")
                 time.sleep(2)
                 continue
@@ -221,7 +293,7 @@ Respond with ONLY this exact JSON structure, no other text:
             try:
                 data = json.loads(cleaned)
             except json.JSONDecodeError as je:
-                last_error = f"Invalid JSON: {je} | raw: {cleaned[:200]}"
+                last_error = f"Invalid JSON: {je} | raw: {cleaned[:200]} [model={current_model}]"
                 log(f"{symbol} AI attempt {attempt}: {last_error}")
                 time.sleep(2)
                 continue
@@ -230,13 +302,13 @@ Respond with ONLY this exact JSON structure, no other text:
             required = ("direction", "expected_high", "expected_low", "reason")
             missing = [k for k in required if k not in data]
             if missing:
-                last_error = f"Missing fields in JSON: {missing} | raw: {data}"
+                last_error = f"Missing fields in JSON: {missing} | raw: {data} [model={current_model}]"
                 log(f"{symbol} AI attempt {attempt}: {last_error}")
                 time.sleep(2)
                 continue
 
             if str(data.get("direction", "")).strip().lower() not in ("bullish", "bearish"):
-                last_error = f"Invalid direction value: {data.get('direction')}"
+                last_error = f"Invalid direction value: {data.get('direction')} [model={current_model}]"
                 log(f"{symbol} AI attempt {attempt}: {last_error}")
                 time.sleep(2)
                 continue
@@ -245,12 +317,19 @@ Respond with ONLY this exact JSON structure, no other text:
             return build_prediction_message(symbol, price, data)
 
         except Exception as e:
-            last_error = f"{type(e).__name__}: {e}"
+            err_text = str(e).lower()
+            last_error = f"{type(e).__name__}: {e} [model={current_model}]"
             log(f"{symbol} AI attempt {attempt} exception: {last_error}")
-            time.sleep(2)
+
+            # If this model doesn't exist / isn't accessible, permanently
+            # rotate to the next candidate so future calls skip it too.
+            if "model_not_found" in err_text or "does not exist" in err_text or "404" in err_text:
+                advance_model()
+            else:
+                time.sleep(2)
 
     return (
-        f"⚠️ {symbol} — AI analysis failed after {MAX_AI_RETRIES} attempts.\n"
+        f"⚠️ {symbol} — AI analysis failed after {max_attempts} attempts.\n"
         f"Price: {price}\n"
         f"Last error: {last_error}"
     )
@@ -317,13 +396,19 @@ def main():
         )
         return
 
-    # 1. Startup test notification
+    # 1. Discover which models this account actually has access to
+    discover_models()
+    active_model = get_active_model()
+    log(f"Using model: {active_model}")
+
+    # 2. Startup test notification
     send_to_ntfy(
-        "✅ Bot started successfully. Running last hour's analysis now...",
+        f"✅ Bot started successfully.\nUsing AI model: {active_model}\n"
+        f"Running last hour's analysis now...",
         title="Bot Test Notification",
     )
 
-    # 2. Immediate analysis using the most recent completed hourly candle
+    # 3. Immediate analysis using the most recent completed hourly candle
     try:
         run_analysis_cycle()
     except Exception as e:
