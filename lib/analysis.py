@@ -56,5 +56,5 @@ Return your analysis strictly formatted in clean Discord Markdown as follows:
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
         max_tokens=900
-    )
+    ) 
     return response.choices[0].message.content
