@@ -1,6 +1,11 @@
 from http.server import BaseHTTPRequestHandler
 import os
+import sys
 import requests
+
+# Add lib to path
+sys.path.insert(0, '/var/task')
+
 from lib.data import get_candles
 from lib.analysis import analyze_with_taurus
 
@@ -43,4 +48,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write("\n".join(results).encode())
-        return 
+        return
