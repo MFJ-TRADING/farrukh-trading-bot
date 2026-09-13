@@ -1,5 +1,4 @@
-Flask
-requests
-groq
-yfinance
-pandas 
+pandas==2.2.0
+yfinance==0.2.48
+requests==2.31.0
+groq==0.4.1
