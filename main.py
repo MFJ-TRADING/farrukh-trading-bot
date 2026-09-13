@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 import yfinance as yf
 from groq import Groq
@@ -20,10 +21,11 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "mf-trading-bot-90")
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
-GROQ_MODEL = "openai/gpt-oss-20b"
-MAX_AI_RETRIES = 2          # retry AI call this many times if empty response
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Free tier, JSON mode supported, no hidden reasoning tokens
+MAX_AI_RETRIES = 3          # retry AI call this many times if empty/invalid JSON response
 MAX_NTFY_RETRIES = 2        # retry sending notification if it fails
 SLEEP_BETWEEN_SYMBOLS = 2   # seconds, avoid rate limits / overlapping notifications
+AI_MAX_TOKENS = 300         # plain JSON output, no reasoning overhead needed
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -119,55 +121,133 @@ def get_candles(yf_symbol, last_n=10):
 
 
 # ============================================================
-# AI ANALYSIS with retry on empty response
+# AI ANALYSIS — strict JSON output, parsed and validated in Python
 # ============================================================
-def analyze(symbol, price, candles):
-    prompt = f"""You are a professional price action trader.
+def build_prediction_message(symbol, price, data):
+    """Build the final human-readable notification text from parsed JSON fields."""
+    direction = str(data.get("direction", "unknown")).strip().lower()
+    emoji = "🟢" if direction == "bullish" else ("🔴" if direction == "bearish" else "⚪")
 
-Asset: {symbol}
+    expected_high = data.get("expected_high", "N/A")
+    expected_low = data.get("expected_low", "N/A")
+    reason = str(data.get("reason", "No reason provided.")).strip()
+    confidence = data.get("confidence", None)
+
+    lines = [
+        f"📊 {symbol} — Next 1H Candle Prediction",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Current Price: {price}",
+        f"{emoji} Next Candle: {direction.capitalize()}",
+        f"📈 Expected High: {expected_high}",
+        f"📉 Expected Low: {expected_low}",
+    ]
+    if confidence is not None:
+        lines.append(f"🎯 Confidence: {confidence}")
+    lines.append(f"Reason: {reason}")
+
+    return "\n".join(lines)
+
+
+def analyze(symbol, price, candles):
+    system_prompt = (
+        "You are a professional price action trading analyst. "
+        "You respond ONLY with a single valid JSON object — no markdown, "
+        "no code fences, no explanation text outside the JSON. "
+        "Base your prediction strictly on the candle data provided. "
+        "Prioritize accuracy over confidence: if the pattern is unclear, "
+        "say so honestly in the reason and lower the confidence score."
+    )
+
+    user_prompt = f"""Asset: {symbol}
 Current Price: {price}
-Last 10 Hourly Candles:
+Last 10 Hourly Candles (oldest to newest):
 {candles}
 
-Predict the NEXT 1H candle only.
+Analyze the price action (trend, momentum, support/resistance from highs/lows,
+candle body/wick patterns) and predict the NEXT 1-hour candle.
 
-Reply STRICTLY in this format (nothing else, no markdown code fences):
-
-📊 {symbol} — Next 1H Candle Prediction
-Current Price: {price}
-Next Candle: Bullish / Bearish
-Expected High: [price]
-Expected Low: [price]
-Reason: 1 short sentence only.
-"""
+Respond with ONLY this exact JSON structure, no other text:
+{{
+  "direction": "bullish" or "bearish",
+  "expected_high": <number>,
+  "expected_low": <number>,
+  "confidence": <number 0-100>,
+  "reason": "<one short sentence explaining the price-action reasoning>"
+}}"""
 
     last_error = None
 
     for attempt in range(1, MAX_AI_RETRIES + 1):
         try:
-            response = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=300,
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=AI_MAX_TOKENS,
+                    response_format={"type": "json_object"},
+                )
+            except TypeError:
+                # older groq SDK versions may not accept response_format
+                response = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=AI_MAX_TOKENS,
+                )
+
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
 
-            if content and content.strip():
-                # strip accidental markdown code fences
-                cleaned = content.strip().strip("`").strip()
-                return cleaned
+            if not content or not content.strip():
+                last_error = f"Empty content (finish_reason={finish_reason})"
+                log(f"{symbol} AI attempt {attempt}: {last_error}")
+                time.sleep(2)
+                continue
 
-            last_error = f"Empty content (finish_reason={finish_reason})"
-            log(f"{symbol} AI attempt {attempt}: {last_error}")
+            # Try to parse JSON (strip stray code fences just in case)
+            cleaned = content.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip("`")
+                cleaned = cleaned.replace("json\n", "", 1).replace("json", "", 1)
+            cleaned = cleaned.strip()
+
+            try:
+                data = json.loads(cleaned)
+            except json.JSONDecodeError as je:
+                last_error = f"Invalid JSON: {je} | raw: {cleaned[:200]}"
+                log(f"{symbol} AI attempt {attempt}: {last_error}")
+                time.sleep(2)
+                continue
+
+            # Validate required fields
+            required = ("direction", "expected_high", "expected_low", "reason")
+            missing = [k for k in required if k not in data]
+            if missing:
+                last_error = f"Missing fields in JSON: {missing} | raw: {data}"
+                log(f"{symbol} AI attempt {attempt}: {last_error}")
+                time.sleep(2)
+                continue
+
+            if str(data.get("direction", "")).strip().lower() not in ("bullish", "bearish"):
+                last_error = f"Invalid direction value: {data.get('direction')}"
+                log(f"{symbol} AI attempt {attempt}: {last_error}")
+                time.sleep(2)
+                continue
+
+            # Success — build the final message
+            return build_prediction_message(symbol, price, data)
 
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
             log(f"{symbol} AI attempt {attempt} exception: {last_error}")
-
-        if attempt < MAX_AI_RETRIES:
-            time.sleep(3)
+            time.sleep(2)
 
     return (
         f"⚠️ {symbol} — AI analysis failed after {MAX_AI_RETRIES} attempts.\n"
@@ -289,4 +369,3 @@ if __name__ == "__main__":
             except Exception:
                 pass
             time.sleep(30)
-            
