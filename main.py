@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 import requests
 import yfinance as yf
 from groq import Groq
@@ -42,6 +43,50 @@ client = Groq(api_key=GROQ_API_KEY)
 # list automatically if a model returns "model_not_found".
 CANDIDATE_MODELS = []
 CURRENT_MODEL_IDX = 0
+
+# Models that reject response_format={"type":"json_object"} at the server
+# level (json_validate_failed) go here — future calls skip forcing that mode.
+JSON_MODE_UNSUPPORTED = set()
+
+
+def extract_json_object(text):
+    """
+    Robustly pull the first valid JSON object out of a text blob, even if
+    the model added stray preamble/postamble text around it despite
+    instructions not to. Returns a dict or raises json.JSONDecodeError.
+    """
+    text = text.strip()
+    # Fast path: the whole thing is already valid JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strip markdown code fences if present
+    fence_match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: find the outermost { ... } block via bracket matching
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    return json.loads(candidate)  # raises if still invalid
+
+    # Nothing worked — raise a clean error
+    raise json.JSONDecodeError("No valid JSON object found in response", text, 0)
+
 
 
 # ============================================================
@@ -246,33 +291,31 @@ Respond with ONLY this exact JSON structure, no other text:
 }}"""
 
     last_error = None
-    max_attempts = max(len(CANDIDATE_MODELS), 1) + 2  # enough tries to rotate through all models plus a couple JSON retries
+    max_attempts = max(len(CANDIDATE_MODELS), 1) + 3  # room to rotate models + json_mode fallback + retries
 
     for attempt in range(1, max_attempts + 1):
         current_model = get_active_model()
+        use_json_mode = current_model not in JSON_MODE_UNSUPPORTED
+
         try:
+            request_kwargs = dict(
+                model=current_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=AI_MAX_TOKENS,
+            )
+            if use_json_mode:
+                request_kwargs["response_format"] = {"type": "json_object"}
+
             try:
-                response = client.chat.completions.create(
-                    model=current_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=AI_MAX_TOKENS,
-                    response_format={"type": "json_object"},
-                )
+                response = client.chat.completions.create(**request_kwargs)
             except TypeError:
-                # older groq SDK versions may not accept response_format
-                response = client.chat.completions.create(
-                    model=current_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=AI_MAX_TOKENS,
-                )
+                # older groq SDK versions may not accept response_format at all
+                request_kwargs.pop("response_format", None)
+                response = client.chat.completions.create(**request_kwargs)
 
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
@@ -283,17 +326,10 @@ Respond with ONLY this exact JSON structure, no other text:
                 time.sleep(2)
                 continue
 
-            # Try to parse JSON (strip stray code fences just in case)
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.strip("`")
-                cleaned = cleaned.replace("json\n", "", 1).replace("json", "", 1)
-            cleaned = cleaned.strip()
-
             try:
-                data = json.loads(cleaned)
+                data = extract_json_object(content)
             except json.JSONDecodeError as je:
-                last_error = f"Invalid JSON: {je} | raw: {cleaned[:200]} [model={current_model}]"
+                last_error = f"Invalid JSON: {je} | raw: {content.strip()[:200]} [model={current_model}]"
                 log(f"{symbol} AI attempt {attempt}: {last_error}")
                 time.sleep(2)
                 continue
@@ -318,13 +354,18 @@ Respond with ONLY this exact JSON structure, no other text:
 
         except Exception as e:
             err_text = str(e).lower()
-            last_error = f"{type(e).__name__}: {e} [model={current_model}]"
+            last_error = f"{type(e).__name__}: {e} [model={current_model}, json_mode={use_json_mode}]"
             log(f"{symbol} AI attempt {attempt} exception: {last_error}")
 
-            # If this model doesn't exist / isn't accessible, permanently
-            # rotate to the next candidate so future calls skip it too.
-            if "model_not_found" in err_text or "does not exist" in err_text or "404" in err_text:
+            if "model_not_found" in err_text or ("does not exist" in err_text and "model" in err_text):
+                # Model itself is inaccessible — permanently rotate away from it.
                 advance_model()
+            elif "json_validate_failed" in err_text or "failed to validate json" in err_text:
+                # This model's server-side JSON-mode validator is unreliable —
+                # stop forcing json_object mode for it and rely on prompt +
+                # robust extraction instead. Retry immediately, same model.
+                JSON_MODE_UNSUPPORTED.add(current_model)
+                log(f"Disabling forced JSON mode for {current_model}, retrying with plain prompt.")
             else:
                 time.sleep(2)
 
@@ -454,3 +495,4 @@ if __name__ == "__main__":
             except Exception:
                 pass
             time.sleep(30)
+    
