@@ -135,13 +135,21 @@ def main():
 
     # 1. Send an immediate test notification so you know it's alive
     test_ok = send_to_ntfy(
-        "✅ Bot started successfully. Waiting for the next hour to begin analysis...",
+        "✅ Bot started successfully. Sending last hour's analysis now...",
         title="Bot Test Notification",
     )
     if not test_ok:
         print("WARNING: Test notification failed to send. Check NTFY_TOPIC / internet connection.")
 
-    # 2. Wait until the top of the next hour, then run every hour after that
+    # 2. Immediately run one analysis cycle using the most recent completed hourly candle
+    try:
+        run_analysis_cycle()
+    except Exception as e:
+        error_msg = f"⚠️ Bot crashed during startup cycle: {e}"
+        print(error_msg)
+        send_to_ntfy(error_msg, title="Bot Error")
+
+    # 3. Wait until the top of the next hour, then run every hour after that
     while True:
         wait_secs = seconds_until_next_hour()
         mins = int(wait_secs // 60)
