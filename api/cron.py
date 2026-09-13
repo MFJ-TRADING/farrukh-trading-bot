@@ -43,4 +43,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write("\n".join(results).encode())
-        return
+        return 
