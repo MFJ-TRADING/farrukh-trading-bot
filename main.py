@@ -58,6 +58,7 @@ TASK:
 1. Analyze price action, market structure, liquidity.
 2. Give clear decision: [BUY], [SELL] or [WAIT]
 3. Give Entry, SL, TP1, TP2 and Risk:Reward
+4. Next hour candle prediction buy aur sell.
 
 OUTPUT strictly in this Discord Markdown format:
 
@@ -68,7 +69,7 @@ OUTPUT strictly in this Discord Markdown format:
 
 🎯 **TRADE DIRECTIVE:** `[BUY / SELL / WAIT]`
 ⚖️ **CONFIDENCE LEVEL:** `[High / Medium / Low]`
-
+ next hour candle prediction
 📍 **KEY TRADE LEVELS:**
 • **Entry Zone:** `[zone]`
 • **Stop Loss (SL):** `[SL]`
