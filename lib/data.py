@@ -46,4 +46,4 @@ def get_candles(symbol: str, period="5d", interval="1h", last_n=12):
             "ok": True
         }
     except Exception as e:
-        return {"price": None, "candles_text": str(e), "ok": False}
+        return {"price": None, "candles_text": str(e), "ok": False} 
