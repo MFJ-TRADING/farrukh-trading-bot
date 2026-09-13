@@ -35,7 +35,16 @@ MODEL_PREFERENCE = [
 
 MAX_NTFY_RETRIES = 2        # retry sending notification if it fails
 SLEEP_BETWEEN_SYMBOLS = 2   # seconds, avoid rate limits / overlapping notifications
-AI_MAX_TOKENS = 300         # plain JSON output, no reasoning overhead needed
+AI_MAX_TOKENS = 300         # default for plain instruct models, no reasoning overhead needed
+REASONING_MODEL_MAX_TOKENS = 1200  # gpt-oss / reasoning models spend tokens "thinking" before answering
+
+
+def is_reasoning_model(model_name):
+    """gpt-oss models (and similar) use hidden chain-of-thought tokens before
+    producing visible content, so they need a much larger token budget or
+    the answer comes back empty with finish_reason=length."""
+    low = model_name.lower()
+    return "gpt-oss" in low or "deepseek" in low or "r1" in low
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -296,6 +305,8 @@ Respond with ONLY this exact JSON structure, no other text:
     for attempt in range(1, max_attempts + 1):
         current_model = get_active_model()
         use_json_mode = current_model not in JSON_MODE_UNSUPPORTED
+        reasoning_model = is_reasoning_model(current_model)
+        token_budget = REASONING_MODEL_MAX_TOKENS if reasoning_model else AI_MAX_TOKENS
 
         try:
             request_kwargs = dict(
@@ -305,23 +316,26 @@ Respond with ONLY this exact JSON structure, no other text:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.2,
-                max_tokens=AI_MAX_TOKENS,
+                max_tokens=token_budget,
             )
             if use_json_mode:
                 request_kwargs["response_format"] = {"type": "json_object"}
+            if reasoning_model:
+                request_kwargs["reasoning_effort"] = "low"
 
             try:
                 response = client.chat.completions.create(**request_kwargs)
             except TypeError:
-                # older groq SDK versions may not accept response_format at all
+                # older groq SDK versions may not accept reasoning_effort/response_format
                 request_kwargs.pop("response_format", None)
+                request_kwargs.pop("reasoning_effort", None)
                 response = client.chat.completions.create(**request_kwargs)
 
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
 
             if not content or not content.strip():
-                last_error = f"Empty content (finish_reason={finish_reason}) [model={current_model}]"
+                last_error = f"Empty content (finish_reason={finish_reason}) [model={current_model}, max_tokens={token_budget}]"
                 log(f"{symbol} AI attempt {attempt}: {last_error}")
                 time.sleep(2)
                 continue
@@ -495,4 +509,4 @@ if __name__ == "__main__":
             except Exception:
                 pass
             time.sleep(30)
-    
+            
