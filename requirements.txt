@@ -2,4 +2,4 @@ Flask
 requests
 groq
 yfinance
-pandas
+pandas 
