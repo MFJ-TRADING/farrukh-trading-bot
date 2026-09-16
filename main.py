@@ -2,55 +2,47 @@ import os
 import time
 import json
 import re
+from datetime import datetime
+
 import requests
 import yfinance as yf
-from groq import Groq
-from datetime import datetime, timedelta
+
+try:
+    import google.generativeai as genai
+except Exception:  # pragma: no cover - dependency may not be installed yet
+    genai = None
 
 # ============================================================
 # CONFIG
 # ============================================================
-SYMBOLS = {
-    "XAUUSD": {"yf": "GC=F", "type": "futures"},
-}
-
-# User requested Google_API_KEY name
-API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GROQ_API_KEY")
+SYMBOLS = {"XAUUSD": {"yf": "GC=F", "type": "futures"}}
+API_KEY = os.environ.get("GOOGLE_API_KEY")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "mf-trading-bot-90")
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
-MODEL_PREFERENCE = [
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
-    "qwen/qwen3.6-27b",
-    "qwen/qwen3.8-27b",
-    "llama-3.1-8b-instant",
+MODEL_CANDIDATES = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
 ]
-
 MAX_NTFY_RETRIES = 2
-SLEEP_BETWEEN_SYMBOLS = 2
-AI_MAX_TOKENS = 400
-REASONING_MODEL_MAX_TOKENS = 1200
-
-client = None
-
-CANDIDATE_MODELS = []
-CURRENT_MODEL_IDX = 0
-JSON_MODE_UNSUPPORTED = set()
+AI_MAX_TOKENS = 800
 
 
-def get_client():
-    global client
-    if client is None:
-        if not API_KEY:
-            raise RuntimeError("Missing GROQ_API_KEY / GOOGLE_API_KEY")
-        client = Groq(api_key=API_KEY)
-    return client
+def log(msg):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}")
 
 
-def is_reasoning_model(model_name):
-    low = model_name.lower()
-    return "gpt-oss" in low or "deepseek" in low or "r1" in low
+def get_google_model(model_name=None):
+    if not API_KEY:
+        raise RuntimeError("Missing GOOGLE_API_KEY")
+    if genai is None:
+        raise RuntimeError("google-generativeai package is not installed")
+
+    genai.configure(api_key=API_KEY)
+    chosen = model_name or MODEL_CANDIDATES[0]
+    return genai.GenerativeModel(chosen)
 
 
 def extract_json_object(text):
@@ -79,63 +71,6 @@ def extract_json_object(text):
                     return json.loads(text[start:i + 1])
 
     raise json.JSONDecodeError("No valid JSON object found", text, 0)
-
-
-def log(msg):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}")
-
-
-def discover_models():
-    global CANDIDATE_MODELS
-    try:
-        resp = requests.get(
-            "https://api.groq.com/openai/v1/models",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            CANDIDATE_MODELS = list(MODEL_PREFERENCE)
-            return
-
-        available_ids = [m["id"] for m in resp.json().get("data", [])]
-        ordered = [m for m in MODEL_PREFERENCE if m in available_ids]
-
-        for mid in available_ids:
-            low = mid.lower()
-            if mid not in ordered and not any(x in low for x in ("whisper", "guard", "tts", "compound")):
-                ordered.append(mid)
-
-        CANDIDATE_MODELS = ordered or list(MODEL_PREFERENCE)
-        log(f"Model candidates: {CANDIDATE_MODELS}")
-    except Exception as e:
-        log(f"Model discovery failed: {e}")
-        CANDIDATE_MODELS = list(MODEL_PREFERENCE)
-
-
-def get_active_model():
-    if not CANDIDATE_MODELS:
-        return MODEL_PREFERENCE[0]
-    return CANDIDATE_MODELS[CURRENT_MODEL_IDX % len(CANDIDATE_MODELS)]
-
-
-def advance_model():
-    global CURRENT_MODEL_IDX
-    CURRENT_MODEL_IDX += 1
-    log(f"Switching to: {get_active_model()}")
-
-
-def is_forex_market_closed():
-    now_utc = datetime.utcnow()
-    weekday = now_utc.weekday()
-    hour = now_utc.hour
-    if weekday == 5:
-        return True
-    if weekday == 6 and hour < 21:
-        return True
-    if weekday == 4 and hour >= 21:
-        return True
-    return False
 
 
 def send_to_ntfy(message, title="XAUUSD Signal"):
@@ -181,12 +116,12 @@ def get_candles(yf_symbol, last_n=12):
         return None, str(e)
 
 
-def build_prediction_message(symbol, price, data):
+def build_prediction_message(price, data):
     direction = str(data.get("direction", "unknown")).strip().lower()
     emoji = "🟢" if direction == "bullish" else ("🔴" if direction == "bearish" else "⚪")
 
     lines = [
-        f"📊 **TAURUS AI — XAUUSD Next 1H Prediction**",
+        "📊 **TAURUS AI — XAUUSD Next 1H Prediction**",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"**Current Price:** {price}",
         f"{emoji} **Next Candle:** {direction.upper()}",
@@ -195,7 +130,7 @@ def build_prediction_message(symbol, price, data):
         f"🎯 **Confidence:** {data.get('confidence', 'N/A')}%",
         f"**Reason:** {data.get('reason', 'No reason provided.')}",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "⚠️ *Not financial advice. Manage risk.*"
+        "⚠️ *Not financial advice. Manage risk.*",
     ]
     return "\n".join(lines)
 
@@ -203,8 +138,7 @@ def build_prediction_message(symbol, price, data):
 def analyze(symbol, price, candles):
     system_prompt = (
         "You are Taurus AI — an elite institutional Gold (XAUUSD) price action analyst. "
-        "You specialize in market structure, liquidity, order flow, and high-probability 1H candle prediction. "
-        "Respond ONLY with a single valid JSON object. No markdown, no extra text."
+        "Reply with ONLY a valid JSON object. No markdown, no extra text."
     )
 
     user_prompt = f"""Asset: XAUUSD (Gold)
@@ -214,87 +148,46 @@ Current Price: {price}
 Recent Hourly Candles (oldest → newest):
 {candles}
 
-Perform expert-level analysis:
-1. Identify current market structure (HH/HL or LH/LL)
-2. Note any liquidity sweeps, equal highs/lows, or order blocks
-3. Assess momentum and candle body/wick behavior
-4. Predict the NEXT 1H candle only
-
-Respond with ONLY this JSON:
-{{
-  "direction": "bullish" or "bearish",
-  "expected_high": <number>,
-  "expected_low": <number>,
-  "confidence": <number 0-100>,
-  "reason": "<1-2 short expert sentences>"
-}}"""
+Perform expert-level technical analysis and predict the NEXT 1H candle only.
+Return JSON with keys: direction, expected_high, expected_low, confidence, reason.
+"""
 
     last_error = None
-    max_attempts = max(len(CANDIDATE_MODELS), 1) + 3
 
-    for attempt in range(1, max_attempts + 1):
-        current_model = get_active_model()
-        use_json_mode = current_model not in JSON_MODE_UNSUPPORTED
-        reasoning = is_reasoning_model(current_model)
-        token_budget = REASONING_MODEL_MAX_TOKENS if reasoning else AI_MAX_TOKENS
-
+    for attempt, model_name in enumerate(MODEL_CANDIDATES, start=1):
         try:
-            kwargs = dict(
-                model=current_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.15,
-                max_tokens=token_budget,
+            model = get_google_model(model_name)
+            response = model.generate_content(
+                [system_prompt, user_prompt],
+                generation_config={
+                    "temperature": 0.15,
+                    "max_output_tokens": AI_MAX_TOKENS,
+                    "response_mime_type": "application/json",
+                },
             )
-            if use_json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            if reasoning:
-                kwargs["reasoning_effort"] = "low"
 
-            groq_client = get_client()
-            try:
-                response = groq_client.chat.completions.create(**kwargs)
-            except TypeError:
-                kwargs.pop("response_format", None)
-                kwargs.pop("reasoning_effort", None)
-                response = groq_client.chat.completions.create(**kwargs)
-
-            content = response.choices[0].message.content
+            content = getattr(response, "text", None) or str(response)
             if not content or not content.strip():
-                last_error = f"Empty response from {current_model}"
-                log(f"{symbol} attempt {attempt}: {last_error}")
-                time.sleep(2)
-                continue
+                raise ValueError("Empty response from Google API")
 
             data = extract_json_object(content)
-
             required = ("direction", "expected_high", "expected_low", "reason")
-            if any(k not in data for k in required):
-                last_error = f"Missing fields: {data}"
-                continue
+            if any(key not in data for key in required):
+                raise ValueError(f"Missing fields: {data}")
 
             direction = str(data.get("direction", "")).lower()
             if direction not in ("bullish", "bearish"):
-                last_error = f"Invalid direction: {direction}"
+                raise ValueError(f"Invalid direction: {direction}")
+
+            return build_prediction_message(price, data)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            log(f"{symbol} attempt {attempt}/{len(MODEL_CANDIDATES)} failed: {last_error}")
+            if attempt < len(MODEL_CANDIDATES):
+                time.sleep(2)
                 continue
 
-            return build_prediction_message(symbol, price, data)
-
-        except Exception as e:
-            err = str(e).lower()
-            last_error = f"{type(e).__name__}: {e}"
-            log(f"{symbol} attempt {attempt}: {last_error}")
-
-            if "model_not_found" in err or "does not exist" in err:
-                advance_model()
-            elif "json_validate_failed" in err:
-                JSON_MODE_UNSUPPORTED.add(current_model)
-            else:
-                time.sleep(2)
-
-    return f"⚠️ XAUUSD — Analysis failed after {max_attempts} attempts.\nLast error: {last_error}"
+    return f"⚠️ XAUUSD — Analysis failed after {len(MODEL_CANDIDATES)} attempts.\nLast error: {last_error}"
 
 
 def run_analysis_cycle():
@@ -303,88 +196,32 @@ def run_analysis_cycle():
     log("=" * 50)
 
     if not API_KEY:
-        log("FATAL: GOOGLE_API_KEY / GROQ_API_KEY missing")
+        log("FATAL: GOOGLE_API_KEY missing")
         return False
-
-    if is_forex_market_closed():
-        msg = "💤 XAUUSD — Market Closed (Weekend)\nNext analysis when market reopens."
-        send_to_ntfy(msg, title="XAUUSD - Market Closed")
-        return True
 
     price, candles = get_candles("GC=F")
     if price is None:
         send_to_ntfy(f"⚠️ XAUUSD — Data Error\n{candles}", title="XAUUSD - Data Error")
-    else:
-        msg = analyze("XAUUSD", price, candles)
-        send_to_ntfy(msg, title="XAUUSD Signal")
+        return False
 
+    msg = analyze("XAUUSD", price, candles)
+    send_to_ntfy(msg, title="XAUUSD Signal")
     log("Cycle complete.")
     return True
-
-
-def run_once():
-    if not API_KEY:
-        log("FATAL: GOOGLE_API_KEY / GROQ_API_KEY missing")
-        return False
-
-    discover_models()
-    log(f"Active model: {get_active_model()}")
-    try:
-        return run_analysis_cycle()
-    except Exception as e:
-        send_to_ntfy(f"⚠️ Startup cycle error: {e}", title="Bot Error")
-        return False
-
-
-def seconds_until_next_hour():
-    now = datetime.now()
-    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    return (next_hour - now).total_seconds()
 
 
 def main():
     log("Taurus XAUUSD Bot starting...")
 
     if not API_KEY:
-        log("FATAL: GOOGLE_API_KEY / GROQ_API_KEY missing")
-        send_to_ntfy("❌ Bot failed: API key missing", title="Bot Error")
+        log("FATAL: GOOGLE_API_KEY missing")
         return
-
-    discover_models()
-    log(f"Active model: {get_active_model()}")
-
-    send_to_ntfy(
-        f"✅ Taurus XAUUSD Bot started\nModel: {get_active_model()}",
-        title="Bot Started"
-    )
 
     try:
         run_analysis_cycle()
-    except Exception as e:
-        send_to_ntfy(f"⚠️ Startup cycle error: {e}", title="Bot Error")
-
-    while True:
-        wait = seconds_until_next_hour()
-        log(f"Waiting {int(wait//60)}m {int(wait%60)}s until next hour...")
-        time.sleep(wait)
-
-        try:
-            run_analysis_cycle()
-        except Exception as e:
-            send_to_ntfy(f"⚠️ Hourly cycle error: {e}", title="Bot Error")
-
-        time.sleep(2)
+    except Exception as exc:
+        send_to_ntfy(f"⚠️ Bot error: {exc}", title="Bot Error")
 
 
 if __name__ == "__main__":
-    while True:
-        try:
-            main()
-            break
-        except Exception as e:
-            log(f"FATAL: {e} — restarting in 30s")
-            try:
-                send_to_ntfy(f"❌ Bot crashed: {e}\nRestarting...", title="Bot Crash")
-            except Exception:
-                pass
-            time.sleep(30)
+    main()

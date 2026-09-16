@@ -1,27 +1,24 @@
 # Farrukh Trading Bot 🤖
 
-A Vercel serverless trading bot powered by **Groq AI** (Taurus) that analyzes financial markets hourly and sends signals to Discord.
+A market analysis bot powered by the **Google Gemini API** that checks XAUUSD and sends AI-generated signals to Discord and ntfy.
 
 ## Features
-- 🎯 **Automated Hourly Analysis** - Runs every hour via Vercel Crons
-- 🤖 **AI-Powered** - Uses Groq's LLaMA model for market analysis
-- 📊 **Multi-Asset** - Tracks XAUUSD, EURUSD, GBPUSD, BOOM1000, CRASH1000
-- 💬 **Discord Integration** - Real-time signals to your Discord server
+- 🎯 **Manual or scheduled execution** from a local environment or CI runner
+- 🤖 **AI-Powered** - Uses Google Gemini for market analysis
+- 📊 **Gold-focused** - Tracks XAUUSD with hourly candles
+- 💬 **Discord + ntfy Integration** - Real-time signal delivery
 
 ## Environment Variables
 ```
+GOOGLE_API_KEY=your_google_api_key
 DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
-GROQ_API_KEY=gsk_...
-DERIV_APP_ID=1234  # (Optional) For Deriv synthetic indices
+NTFY_TOPIC=your_ntfy_topic  # optional
 ```
 
-## Deployment
-Deploy to Vercel:
+## Run locally
 ```bash
-vercel deploy
+python main.py
 ```
-
-The bot will automatically run the `/api/cron` endpoint every hour.
 
 ---
 **Built with ❤️ by Farrukh**
