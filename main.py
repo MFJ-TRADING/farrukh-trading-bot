@@ -32,11 +32,20 @@ SLEEP_BETWEEN_SYMBOLS = 2
 AI_MAX_TOKENS = 400
 REASONING_MODEL_MAX_TOKENS = 1200
 
-client = Groq(api_key=API_KEY)
+client = None
 
 CANDIDATE_MODELS = []
 CURRENT_MODEL_IDX = 0
 JSON_MODE_UNSUPPORTED = set()
+
+
+def get_client():
+    global client
+    if client is None:
+        if not API_KEY:
+            raise RuntimeError("Missing GROQ_API_KEY / GOOGLE_API_KEY")
+        client = Groq(api_key=API_KEY)
+    return client
 
 
 def is_reasoning_model(model_name):
@@ -244,12 +253,13 @@ Respond with ONLY this JSON:
             if reasoning:
                 kwargs["reasoning_effort"] = "low"
 
+            groq_client = get_client()
             try:
-                response = client.chat.completions.create(**kwargs)
+                response = groq_client.chat.completions.create(**kwargs)
             except TypeError:
                 kwargs.pop("response_format", None)
                 kwargs.pop("reasoning_effort", None)
-                response = client.chat.completions.create(**kwargs)
+                response = groq_client.chat.completions.create(**kwargs)
 
             content = response.choices[0].message.content
             if not content or not content.strip():
@@ -292,10 +302,14 @@ def run_analysis_cycle():
     log("Starting XAUUSD analysis cycle")
     log("=" * 50)
 
+    if not API_KEY:
+        log("FATAL: GOOGLE_API_KEY / GROQ_API_KEY missing")
+        return False
+
     if is_forex_market_closed():
         msg = "💤 XAUUSD — Market Closed (Weekend)\nNext analysis when market reopens."
         send_to_ntfy(msg, title="XAUUSD - Market Closed")
-        return
+        return True
 
     price, candles = get_candles("GC=F")
     if price is None:
@@ -305,6 +319,21 @@ def run_analysis_cycle():
         send_to_ntfy(msg, title="XAUUSD Signal")
 
     log("Cycle complete.")
+    return True
+
+
+def run_once():
+    if not API_KEY:
+        log("FATAL: GOOGLE_API_KEY / GROQ_API_KEY missing")
+        return False
+
+    discover_models()
+    log(f"Active model: {get_active_model()}")
+    try:
+        return run_analysis_cycle()
+    except Exception as e:
+        send_to_ntfy(f"⚠️ Startup cycle error: {e}", title="Bot Error")
+        return False
 
 
 def seconds_until_next_hour():
