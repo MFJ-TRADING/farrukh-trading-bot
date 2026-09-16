@@ -1,4 +1,4 @@
-name: Taurus AI Hourly Analysis
+name: Farrukh Taurus AI Hourly Analysis
 
 on:
   schedule:
