@@ -19,6 +19,7 @@ SYMBOLS = {"XAUUSD": {"yf": "GC=F", "type": "futures"}}
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "mf-trading-bot-90")
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 
 MODEL_CANDIDATES = [
     "gemini-2.0-flash",
@@ -26,6 +27,7 @@ MODEL_CANDIDATES = [
     "gemini-1.5-flash-8b",
 ]
 MAX_NTFY_RETRIES = 2
+MAX_DISCORD_RETRIES = 2
 AI_MAX_TOKENS = 800
 
 
@@ -74,6 +76,9 @@ def extract_json_object(text):
 
 
 def send_to_ntfy(message, title="XAUUSD Signal"):
+    if not NTFY_TOPIC:
+        log("ntfy SKIPPED: NTFY_TOPIC not set")
+        return False
     if not message or not message.strip():
         message = f"⚠️ {title}: (empty message)"
     for attempt in range(1, MAX_NTFY_RETRIES + 1):
@@ -85,14 +90,49 @@ def send_to_ntfy(message, title="XAUUSD Signal"):
                 timeout=15,
             )
             if response.status_code == 200:
-                log(f"ntfy OK ({title})")
+                log(f"ntfy OK ({title}) -> topic '{NTFY_TOPIC}'")
                 return True
-            log(f"ntfy attempt {attempt} failed: {response.status_code}")
+            log(f"ntfy attempt {attempt} failed: {response.status_code} {response.text[:200]}")
         except Exception as e:
             log(f"ntfy attempt {attempt} exception: {e}")
         if attempt < MAX_NTFY_RETRIES:
             time.sleep(3)
     return False
+
+
+def send_to_discord(message, title="XAUUSD Signal"):
+    if not DISCORD_WEBHOOK:
+        log("discord SKIPPED: DISCORD_WEBHOOK not set")
+        return False
+
+    content = f"**{title}**\n{message}"
+    # Discord hard-caps message content at 2000 chars
+    if len(content) > 1990:
+        content = content[:1987] + "..."
+
+    for attempt in range(1, MAX_DISCORD_RETRIES + 1):
+        try:
+            response = requests.post(
+                DISCORD_WEBHOOK,
+                json={"content": content},
+                timeout=15,
+            )
+            # Discord webhooks return 204 No Content on success
+            if response.status_code in (200, 204):
+                log(f"discord OK ({title})")
+                return True
+            log(f"discord attempt {attempt} failed: {response.status_code} {response.text[:200]}")
+        except Exception as e:
+            log(f"discord attempt {attempt} exception: {e}")
+        if attempt < MAX_DISCORD_RETRIES:
+            time.sleep(3)
+    return False
+
+
+def notify_all(message, title="XAUUSD Signal"):
+    ntfy_ok = send_to_ntfy(message, title=title)
+    discord_ok = send_to_discord(message, title=title)
+    return ntfy_ok, discord_ok
 
 
 def get_candles(yf_symbol, last_n=12):
@@ -197,17 +237,29 @@ def run_analysis_cycle():
 
     if not API_KEY:
         log("FATAL: GOOGLE_API_KEY missing")
+        notify_all("⚠️ Bot error: GOOGLE_API_KEY missing", title="Bot Error")
         return False
 
     price, candles = get_candles("GC=F")
     if price is None:
-        send_to_ntfy(f"⚠️ XAUUSD — Data Error\n{candles}", title="XAUUSD - Data Error")
+        notify_all(f"⚠️ XAUUSD — Data Error\n{candles}", title="XAUUSD - Data Error")
         return False
 
     msg = analyze("XAUUSD", price, candles)
-    send_to_ntfy(msg, title="XAUUSD Signal")
-    log("Cycle complete.")
-    return True
+    ntfy_ok, discord_ok = notify_all(msg, title="XAUUSD Signal")
+    log(f"Cycle complete. ntfy_ok={ntfy_ok} discord_ok={discord_ok}")
+    return ntfy_ok or discord_ok
+
+
+# Entry point expected by handler.py (Vercel/serverless-style handler does:
+# `from main import run_once`)
+def run_once():
+    try:
+        return run_analysis_cycle()
+    except Exception as exc:
+        log(f"run_once error: {exc}")
+        notify_all(f"⚠️ Bot error: {exc}", title="Bot Error")
+        raise
 
 
 def main():
@@ -221,6 +273,7 @@ def main():
         run_analysis_cycle()
     except Exception as exc:
         send_to_ntfy(f"⚠️ Bot error: {exc}", title="Bot Error")
+        send_to_discord(f"⚠️ Bot error: {exc}", title="Bot Error")
 
 
 if __name__ == "__main__":
