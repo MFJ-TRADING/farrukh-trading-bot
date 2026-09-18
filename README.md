@@ -9,11 +9,13 @@ A market analysis bot powered by the **Google Gemini API** that checks XAUUSD an
 - 💬 **Discord + ntfy Integration** - Real-time signal delivery
 
 ## Environment Variables
+```bash
+export GOOGLE_API_KEY=your_google_api_key
+export NTFY_TOPIC=your_ntfy_topic  # optional
+export DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 ```
-GOOGLE_API_KEY=your_google_api_key
-DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
-NTFY_TOPIC=your_ntfy_topic  # optional
-```
+
+> The app now uses the current Google Gemini SDK (`google-genai`). If your key is missing or invalid, the bot will log a clear runtime error instead of silently failing.
 
 ## Run locally
 ```bash

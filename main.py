@@ -8,6 +8,11 @@ import requests
 import yfinance as yf
 
 try:
+    from google import genai as google_genai_module
+except Exception:  # pragma: no cover - dependency may not be installed yet
+    google_genai_module = None
+
+try:
     import google.generativeai as genai
 except Exception:  # pragma: no cover - dependency may not be installed yet
     genai = None
@@ -39,12 +44,57 @@ def log(msg):
 def get_google_model(model_name=None):
     if not API_KEY:
         raise RuntimeError("Missing GOOGLE_API_KEY")
+
+    chosen = model_name or MODEL_CANDIDATES[0]
+
+    if google_genai_module is not None:
+        return {
+            "provider": "google-genai",
+            "model": chosen,
+            "client": google_genai_module.Client(api_key=API_KEY),
+        }
+
     if genai is None:
-        raise RuntimeError("google-generativeai package is not installed")
+        raise RuntimeError(
+            "Gemini SDK is not installed. Install 'google-genai' or 'google-generativeai'."
+        )
 
     genai.configure(api_key=API_KEY)
-    chosen = model_name or MODEL_CANDIDATES[0]
-    return genai.GenerativeModel(chosen)
+    return {
+        "provider": "legacy-google-generativeai",
+        "model": chosen,
+        "client": genai.GenerativeModel(chosen),
+    }
+
+
+def generate_google_content(model_name, system_prompt, user_prompt):
+    model_info = get_google_model(model_name)
+
+    if model_info["provider"] == "google-genai":
+        try:
+            from google.genai import types
+        except Exception as exc:  # pragma: no cover - dependency may not be installed yet
+            raise RuntimeError("google-genai SDK is missing types support") from exc
+
+        return model_info["client"].models.generate_content(
+            model=model_info["model"],
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.15,
+                max_output_tokens=AI_MAX_TOKENS,
+                response_mime_type="application/json",
+            ),
+        )
+
+    return model_info["client"].generate_content(
+        [system_prompt, user_prompt],
+        generation_config={
+            "temperature": 0.15,
+            "max_output_tokens": AI_MAX_TOKENS,
+            "response_mime_type": "application/json",
+        },
+    )
 
 
 def extract_json_object(text):
@@ -196,15 +246,7 @@ Return JSON with keys: direction, expected_high, expected_low, confidence, reaso
 
     for attempt, model_name in enumerate(MODEL_CANDIDATES, start=1):
         try:
-            model = get_google_model(model_name)
-            response = model.generate_content(
-                [system_prompt, user_prompt],
-                generation_config={
-                    "temperature": 0.15,
-                    "max_output_tokens": AI_MAX_TOKENS,
-                    "response_mime_type": "application/json",
-                },
-            )
+            response = generate_google_content(model_name, system_prompt, user_prompt)
 
             content = getattr(response, "text", None) or str(response)
             if not content or not content.strip():
