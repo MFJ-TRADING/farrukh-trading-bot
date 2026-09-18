@@ -38,7 +38,7 @@ MODEL_CANDIDATES = [
 ]
 MAX_NTFY_RETRIES = 2
 MAX_DISCORD_RETRIES = 2
-AI_MAX_TOKENS = 800
+AI_MAX_TOKENS = 1024
 
 
 def log(msg):
@@ -81,6 +81,16 @@ def generate_google_content(model_name, system_prompt, user_prompt):
         except Exception as exc:  # pragma: no cover - dependency may not be installed yet
             raise RuntimeError("google-genai SDK is missing types support") from exc
 
+        # Gemini 2.5 models "think" by default, which can silently eat the
+        # entire max_output_tokens budget on internal reasoning and leave
+        # response.text empty (-> JSON parse fails on an empty string).
+        # Disable thinking for 2.5 models; Gemini 3 models use a different
+        # knob (thinking_level) and error out if thinking_budget is also set.
+        if "gemini-3" in model_info["model"]:
+            thinking_config = types.ThinkingConfig(thinking_level="low")
+        else:
+            thinking_config = types.ThinkingConfig(thinking_budget=0)
+
         return model_info["client"].models.generate_content(
             model=model_info["model"],
             contents=user_prompt,
@@ -89,6 +99,7 @@ def generate_google_content(model_name, system_prompt, user_prompt):
                 temperature=0.15,
                 max_output_tokens=AI_MAX_TOKENS,
                 response_mime_type="application/json",
+                thinking_config=thinking_config,
             ),
         )
 
@@ -253,9 +264,14 @@ Return JSON with keys: direction, expected_high, expected_low, confidence, reaso
         try:
             response = generate_google_content(model_name, system_prompt, user_prompt)
 
-            content = getattr(response, "text", None) or str(response)
+            content = getattr(response, "text", None)
             if not content or not content.strip():
-                raise ValueError("Empty response from Google API")
+                finish_reason = None
+                try:
+                    finish_reason = response.candidates[0].finish_reason
+                except Exception:
+                    pass
+                raise ValueError(f"Empty response from Google API (finish_reason={finish_reason})")
 
             data = extract_json_object(content)
             required = ("direction", "expected_high", "expected_low", "reason")
