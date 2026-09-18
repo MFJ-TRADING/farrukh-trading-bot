@@ -1,0 +1,61 @@
+name: Farrukh Taurus AI Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Days of hourly history to test'
+        required: false
+        default: '14'
+      stride:
+        description: 'Hours between simulated signals (controls API cost)'
+        required: false
+        default: '6'
+      lookahead_hours:
+        description: 'Max hours to wait for SL/TP to be hit'
+        required: false
+        default: '24'
+
+concurrency:
+  group: taurus-ai-backtest
+  cancel-in-progress: true
+
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Taurus AI Backtest
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python backtest.py \
+            --days ${{ github.event.inputs.days }} \
+            --stride ${{ github.event.inputs.stride }} \
+            --lookahead-hours ${{ github.event.inputs.lookahead_hours }} \
+            --out backtest_results
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: taurus-backtest-results
+          path: |
+            backtest_results.csv
+            backtest_results.xlsx
+          if-no-files-found: warn
