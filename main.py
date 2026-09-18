@@ -22,7 +22,7 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash",
+    "gemini-2.5-flash",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
 ]
