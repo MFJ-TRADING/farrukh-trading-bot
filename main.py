@@ -36,8 +36,8 @@ MODEL_CANDIDATES = [
     "gemini-2.5-flash",
     "gemini-3-flash-preview",
 ]
-MAX_NTFY_RETRIES = 2
-MAX_DISCORD_RETRIES = 2
+MAX_NTFY_RETRIES = 1
+MAX_DISCORD_RETRIES = 24
 AI_MAX_TOKENS = 1024
 
 
