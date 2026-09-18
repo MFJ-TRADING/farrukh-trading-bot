@@ -26,10 +26,15 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "mf-trading-bot-90")
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 
+# NOTE: gemini-1.5-flash and gemini-1.5-flash-8b have been fully shut down by
+# Google (retired in 2025) and now return a 404 "model not found" error on
+# every call. That was very likely why the whole chain of candidates failed.
+# "gemini-flash-latest" is Google's alias that always points at the newest
+# stable Flash model, so it's the safest first choice.
 MODEL_CANDIDATES = [
+    "gemini-flash-latest",
     "gemini-2.5-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
+    "gemini-3-flash-preview",
 ]
 MAX_NTFY_RETRIES = 2
 MAX_DISCORD_RETRIES = 2
