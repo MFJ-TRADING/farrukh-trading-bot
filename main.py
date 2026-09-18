@@ -236,6 +236,12 @@ def build_prediction_message(price, data):
         f"🎯 **Confidence:** {data.get('confidence', 'N/A')}%",
         f"**Reason:** {data.get('reason', 'No reason provided.')}",
         "━━━━━━━━━━━━━━━━━━━━━━",
+        "💰 **Trade Setup**",
+        f"▶️ **Entry:** {data.get('entry_price', 'N/A')}",
+        f"🛑 **Stop Loss:** {data.get('stop_loss', 'N/A')}",
+        f"🎯 **Take Profit:** {data.get('take_profit', 'N/A')}",
+        f"⚖️ **Risk:Reward:** {data.get('risk_reward', 'N/A')}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
         "⚠️ *Not financial advice. Manage risk.*",
     ]
     return "\n".join(lines)
@@ -255,7 +261,13 @@ Recent Hourly Candles (oldest → newest):
 {candles}
 
 Perform expert-level technical analysis and predict the NEXT 1H candle only.
-Return JSON with keys: direction, expected_high, expected_low, confidence, reason.
+Also propose one concrete trade setup consistent with that prediction
+(entry near current price or a sensible pullback level, a stop loss beyond
+recent structure, and a take profit; risk_reward should be the TP distance
+divided by the SL distance, e.g. "1:2").
+
+Return JSON with keys: direction, expected_high, expected_low, confidence,
+reason, entry_price, stop_loss, take_profit, risk_reward.
 """
 
     last_error = None
@@ -274,7 +286,10 @@ Return JSON with keys: direction, expected_high, expected_low, confidence, reaso
                 raise ValueError(f"Empty response from Google API (finish_reason={finish_reason})")
 
             data = extract_json_object(content)
-            required = ("direction", "expected_high", "expected_low", "reason")
+            required = (
+                "direction", "expected_high", "expected_low", "reason",
+                "entry_price", "stop_loss", "take_profit", "risk_reward",
+            )
             if any(key not in data for key in required):
                 raise ValueError(f"Missing fields: {data}")
 
